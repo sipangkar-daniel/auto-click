@@ -28,3 +28,6 @@ Thumbs.db
 
 # PRD files (ignored as requested)
 prd/*
+
+# Brain files
+gemini.md
