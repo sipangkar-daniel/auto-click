@@ -978,7 +978,7 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
         onSelect: () -> Unit,
         onUpdate: (MacroStep) -> Unit
     ) {
-        val density = LocalDensity.current.density
+        val currentStep by rememberUpdatedState(step)
         val markerColor = when (step.actionType) {
             ActionType.TAP -> Color(0xFF4CAF50)
             ActionType.HOLD -> Color(0xFF2196F3)
@@ -998,13 +998,14 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
                     .clip(CircleShape)
                     .background(markerColor)
                     .border(2.dp, Color.White, CircleShape)
-                    .pointerInput(step) {
+                    .pointerInput(Unit) {
                         detectDragGestures { change, dragAmount ->
                             change.consume()
+                            val s = currentStep
                             onUpdate(
-                                step.copy(
-                                    startX = step.startX + dragAmount.x,
-                                    startY = step.startY + dragAmount.y
+                                s.copy(
+                                    startX = (s.startX ?: 0f) + dragAmount.x,
+                                    startY = (s.startY ?: 0f) + dragAmount.y
                                 )
                             )
                         }
@@ -1036,13 +1037,14 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
                     .clip(CircleShape)
                     .background(markerColor.copy(alpha = 0.8f))
                     .border(2.dp, Color.White, CircleShape)
-                    .pointerInput(step) {
+                    .pointerInput(Unit) {
                         detectDragGestures { change, dragAmount ->
                             change.consume()
+                            val s = currentStep
                             onUpdate(
-                                step.copy(
-                                    endX = step.endX + dragAmount.x,
-                                    endY = step.endY + dragAmount.y
+                                s.copy(
+                                    endX = (s.endX ?: 0f) + dragAmount.x,
+                                    endY = (s.endY ?: 0f) + dragAmount.y
                                 )
                             )
                         }
