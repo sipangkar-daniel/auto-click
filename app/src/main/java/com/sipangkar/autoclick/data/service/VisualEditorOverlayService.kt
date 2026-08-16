@@ -140,6 +140,7 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
 
         serviceScope.launch {
             currentMode.collect { mode ->
+                enableInteractMode(false)
                 updateWindowSize(mode == OverlayMode.EDITING)
                 if (mode == OverlayMode.PLAYING) {
                     val macro = activeMacroState.value
@@ -268,6 +269,116 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
         }
     }
 
+    private var isInteractMode = false
+    private var unlockButtonView: View? = null
+
+    private fun enableInteractMode(enable: Boolean) {
+        isInteractMode = enable
+        val view = overlayView ?: return
+        
+        if (enable) {
+            // Make main overlay window untouchable
+            layoutParams.flags = layoutParams.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+            windowManager.updateViewLayout(view, layoutParams)
+            
+            // Show floating unlock button
+            showUnlockButton()
+        } else {
+            // Restore main overlay window touchability
+            layoutParams.flags = layoutParams.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+            windowManager.updateViewLayout(view, layoutParams)
+            
+            // Hide floating unlock button
+            hideUnlockButton()
+        }
+    }
+
+    private fun showUnlockButton() {
+        if (unlockButtonView != null) return
+        
+        val density = resources.displayMetrics.density
+        val params = WindowManager.LayoutParams().apply {
+            type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+            } else {
+                @Suppress("DEPRECATION")
+                WindowManager.LayoutParams.TYPE_PHONE
+            }
+            format = PixelFormat.TRANSLUCENT
+            flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+            width = (64 * density).toInt()
+            height = (64 * density).toInt()
+            gravity = Gravity.TOP or Gravity.END
+            x = 20
+            y = 200
+        }
+
+        val composeView = ComposeView(this).apply {
+            setViewTreeLifecycleOwner(this@VisualEditorOverlayService)
+            setViewTreeSavedStateRegistryOwner(this@VisualEditorOverlayService)
+            setViewTreeViewModelStoreOwner(this@VisualEditorOverlayService)
+
+            setContent {
+                MaterialTheme {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(4.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xE6E91E63))
+                            .clickable {
+                                enableInteractMode(false)
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.LockOpen,
+                            contentDescription = "Unlock Edit Mode",
+                            tint = Color.White,
+                            modifier = Modifier.size(24.dp)
+                        )
+                    }
+                }
+            }
+        }
+
+        windowManager.addView(composeView, params)
+        unlockButtonView = composeView
+    }
+
+    private fun hideUnlockButton() {
+        unlockButtonView?.let { view ->
+            try {
+                windowManager.removeView(view)
+            } catch (e: Exception) {
+                Log.e(TAG, "Remove unlock button failed", e)
+            }
+        }
+        unlockButtonView = null
+    }
+
+    private fun distanceToSegment(px: Float, py: Float, ax: Float, ay: Float, bx: Float, by: Float): Float {
+        val dx = bx - ax
+        val dy = by - ay
+        if (dx == 0f && dy == 0f) {
+            val xDiff = px - ax
+            val yDiff = py - ay
+            return Math.sqrt((xDiff * xDiff + yDiff * yDiff).toDouble()).toFloat()
+        }
+        
+        val t = ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)
+        val clampedT = Math.max(0f, Math.min(1f, t))
+        
+        val closestX = ax + clampedT * dx
+        val closestY = ay + clampedT * dy
+        
+        val xDiff = px - closestX
+        val yDiff = py - closestY
+        return Math.sqrt((xDiff * xDiff + yDiff * yDiff).toDouble()).toFloat()
+    }
+
     @Composable
     fun FloatingControlPanel() {
         val mode by currentMode.collectAsState()
@@ -294,10 +405,51 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
             modifier = Modifier.fillMaxSize()
         ) {
             if (mode == OverlayMode.EDITING) {
+                var draggedStepIndex by remember { mutableStateOf(-1) }
+
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
                         .background(Color(0x11000000))
+                        .pointerInput(Unit) {
+                            detectDragGestures(
+                                onDragStart = { offset ->
+                                    val threshold = 50f
+                                    var closestIndex = -1
+                                    var minDistance = Float.MAX_VALUE
+                                    macroSteps.forEachIndexed { idx, step ->
+                                        if ((step.actionType == ActionType.DRAG || step.actionType == ActionType.SCROLL) &&
+                                            step.startX != null && step.startY != null &&
+                                            step.endX != null && step.endY != null
+                                        ) {
+                                            val dist = distanceToSegment(
+                                                offset.x, offset.y,
+                                                step.startX, step.startY,
+                                                step.endX, step.endY
+                                            )
+                                            if (dist < threshold && dist < minDistance) {
+                                                minDistance = dist
+                                                closestIndex = idx
+                                            }
+                                        }
+                                    }
+                                    draggedStepIndex = closestIndex
+                                },
+                                onDragEnd = { draggedStepIndex = -1 },
+                                onDragCancel = { draggedStepIndex = -1 }
+                            ) { change, dragAmount ->
+                                change.consume()
+                                if (draggedStepIndex != -1) {
+                                    val s = macroSteps[draggedStepIndex]
+                                    macroSteps[draggedStepIndex] = s.copy(
+                                        startX = (s.startX ?: 0f) + dragAmount.x,
+                                        startY = (s.startY ?: 0f) + dragAmount.y,
+                                        endX = if (s.endX != null) s.endX + dragAmount.x else null,
+                                        endY = if (s.endY != null) s.endY + dragAmount.y else null
+                                    )
+                                }
+                            }
+                        }
                         .pointerInput(Unit) {
                             detectTapGestures { offset ->
                                 performClickThrough(offset.x, offset.y)
@@ -355,6 +507,9 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
                             )
                             activeMacroState.value = tempMacro
                             setMode(OverlayMode.PLAYING)
+                        },
+                        onToggleLock = {
+                            enableInteractMode(true)
                         },
                         onSave = { showSaveDialog = true },
                         onClose = { setMode(OverlayMode.IDLE) }
@@ -1035,12 +1190,27 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
                         detectDragGestures { change, dragAmount ->
                             change.consume()
                             val s = currentStep
-                            onUpdate(
-                                s.copy(
-                                    startX = (s.startX ?: 0f) + dragAmount.x,
-                                    startY = (s.startY ?: 0f) + dragAmount.y
+                            val newStartX = (s.startX ?: 0f) + dragAmount.x
+                            val newStartY = (s.startY ?: 0f) + dragAmount.y
+                            if (s.actionType == ActionType.DRAG || s.actionType == ActionType.SCROLL) {
+                                val dx = dragAmount.x
+                                val dy = dragAmount.y
+                                onUpdate(
+                                    s.copy(
+                                        startX = newStartX,
+                                        startY = newStartY,
+                                        endX = if (s.endX != null) s.endX + dx else null,
+                                        endY = if (s.endY != null) s.endY + dy else null
+                                    )
                                 )
-                            )
+                            } else {
+                                onUpdate(
+                                    s.copy(
+                                        startX = newStartX,
+                                        startY = newStartY
+                                    )
+                                )
+                            }
                         }
                     }
                     .clickable { onSelect() },
@@ -1344,6 +1514,7 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
         onAddDelay: () -> Unit,
         onAddImage: () -> Unit,
         onTryFlow: () -> Unit,
+        onToggleLock: () -> Unit,
         onSave: () -> Unit,
         onClose: () -> Unit
     ) {
@@ -1367,6 +1538,7 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
                 VerticalDivider(color = Color.DarkGray, modifier = Modifier.height(28.dp))
 
                 ToolbarButton(Icons.Default.PlayArrow, "Try Flow", Color(0xFF4CAF50)) { onTryFlow() }
+                ToolbarButton(Icons.Default.Lock, "Lock/Scroll", Color.Yellow) { onToggleLock() }
                 ToolbarButton(Icons.Default.Save, "Save", Color.White) { onSave() }
                 ToolbarButton(Icons.Default.Close, "Close", Color.Red) { onClose() }
             }
@@ -1448,6 +1620,7 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
         Log.d(TAG, "Overlay Service Destroyed")
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_DESTROY)
         serviceScope.cancel()
+        hideUnlockButton()
         overlayView?.let { view ->
             windowManager.removeView(view)
         }
