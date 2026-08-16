@@ -27,5 +27,4 @@ Thumbs.db
 *.pk8
 
 # PRD files (ignored as requested)
-prd/PRODUCT REQUIREMENTS DOCUMENT (PRD).txt
-prd/UPDATE PRD - IMAGE DETECTION.txt
+prd/*
