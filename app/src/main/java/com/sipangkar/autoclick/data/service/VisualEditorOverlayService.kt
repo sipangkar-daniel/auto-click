@@ -5,13 +5,16 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.graphics.Bitmap
 import android.graphics.PixelFormat
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import android.view.Gravity
+import android.view.View
 import android.view.WindowManager
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -29,6 +32,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.ComposeView
@@ -51,8 +55,10 @@ import androidx.savedstate.SavedStateRegistryController
 import androidx.savedstate.SavedStateRegistryOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import com.sipangkar.autoclick.domain.model.ActionType
+import com.sipangkar.autoclick.domain.model.DetectionType
 import com.sipangkar.autoclick.domain.model.Macro
 import com.sipangkar.autoclick.domain.model.MacroStep
+import com.sipangkar.autoclick.domain.model.TimeoutAction
 import com.sipangkar.autoclick.domain.usecase.SaveMacroUseCase
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
@@ -62,6 +68,8 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import java.io.File
+import java.io.FileOutputStream
 import javax.inject.Inject
 
 @AndroidEntryPoint
@@ -75,7 +83,6 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
         private val _currentMode = MutableStateFlow(OverlayMode.IDLE)
         val currentMode: StateFlow<OverlayMode> = _currentMode
 
-        // Draggable Macro Steps State
         val macroSteps = mutableStateListOf<MacroStep>()
         var activeMacroName = mutableStateOf("New Macro")
 
@@ -99,6 +106,17 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
     private lateinit var layoutParams: WindowManager.LayoutParams
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
+    // Image Setup flows
+    private val imageSetupState = mutableStateOf(ImageDetectionSetupState.NONE)
+    private val capturedBitmapState = mutableStateOf<Bitmap?>(null)
+    private val croppedImagePathState = mutableStateOf<String?>(null)
+
+    // ROI bounding box in local layout coordinates
+    private val roiLeft = mutableStateOf(100f)
+    private val roiTop = mutableStateOf(200f)
+    private val roiRight = mutableStateOf(500f)
+    private val roiBottom = mutableStateOf(500f)
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
@@ -113,7 +131,6 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
         startForegroundService()
         setupOverlayWindow()
 
-        // Observe mode to adjust layout size
         serviceScope.launch {
             currentMode.collect { mode ->
                 updateWindowSize(mode == OverlayMode.EDITING)
@@ -199,7 +216,6 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
             layoutParams.height = WindowManager.LayoutParams.MATCH_PARENT
             layoutParams.flags = WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
                     WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
-            // Reset position to cover whole screen
             layoutParams.x = 0
             layoutParams.y = 0
         } else {
@@ -222,6 +238,8 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
         
         var selectedStepForEdit by remember { mutableStateOf<MacroStep?>(null) }
         var showSaveDialog by remember { mutableStateOf(false) }
+        val setupState by imageSetupState
+        val capturedBitmap by capturedBitmapState
 
         val dragModifier = Modifier.pointerInput(Unit) {
             detectDragGestures { change, dragAmount ->
@@ -239,19 +257,15 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
         Box(
             modifier = Modifier.fillMaxSize()
         ) {
-            // Fullscreen content for Editing mode
             if (mode == OverlayMode.EDITING) {
-                // Dim screen overlay background
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
                         .background(Color(0x11000000))
                 )
 
-                // Drag Arrows Drawing Canvas
                 DragArrowsCanvas()
 
-                // Render Action Markers
                 macroSteps.forEachIndexed { index, step ->
                     ActionMarker(
                         step = step,
@@ -266,7 +280,6 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
                     )
                 }
 
-                // Header toolbar name
                 Card(
                     colors = CardDefaults.cardColors(containerColor = Color(0xCC1E1E1E)),
                     modifier = Modifier
@@ -281,7 +294,6 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
                     )
                 }
 
-                // Float Toolbar Editor placed at bottom center
                 Box(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
@@ -293,12 +305,12 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
                         onAddDrag = { addStep(ActionType.DRAG) },
                         onAddScroll = { addStep(ActionType.SCROLL) },
                         onAddDelay = { addStep(ActionType.DELAY) },
+                        onAddImage = { imageSetupState.value = ImageDetectionSetupState.SELECT_SOURCE },
                         onSave = { showSaveDialog = true },
                         onClose = { setMode(OverlayMode.IDLE) }
                     )
                 }
 
-                // Step Settings dialog overlay
                 selectedStepForEdit?.let { step ->
                     StepSettingsDialog(
                         step = step,
@@ -312,7 +324,6 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
                         },
                         onDelete = {
                             macroSteps.remove(step)
-                            // Re-order remaining steps
                             val stepsCopy = ArrayList(macroSteps.sortedBy { it.sequenceOrder })
                             macroSteps.clear()
                             stepsCopy.forEachIndexed { idx, s ->
@@ -323,7 +334,6 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
                     )
                 }
 
-                // Naming and Saving Dialog
                 if (showSaveDialog) {
                     SaveMacroDialog(
                         onDismiss = { showSaveDialog = false },
@@ -334,8 +344,47 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
                     )
                 }
 
+                if (setupState == ImageDetectionSetupState.SELECT_SOURCE) {
+                    SelectImageSourceDialog(
+                        onDismiss = { imageSetupState.value = ImageDetectionSetupState.NONE },
+                        onLiveCapture = { triggerLiveCapture() }
+                    )
+                }
+
+                if (setupState == ImageDetectionSetupState.FREEZE_CROP && capturedBitmap != null) {
+                    CropToolOverlay(
+                        bitmap = capturedBitmap!!,
+                        onDismiss = { imageSetupState.value = ImageDetectionSetupState.NONE },
+                        onCropped = { path ->
+                            croppedImagePathState.value = path
+                            imageSetupState.value = ImageDetectionSetupState.SETUP_ROI
+                        }
+                    )
+                }
+
+                if (setupState == ImageDetectionSetupState.SETUP_ROI) {
+                    RoiSelectorOverlay(
+                        onDismiss = { imageSetupState.value = ImageDetectionSetupState.NONE },
+                        onConfirm = { left, top, right, bottom ->
+                            roiLeft.value = left
+                            roiTop.value = top
+                            roiRight.value = right
+                            roiBottom.value = bottom
+                            imageSetupState.value = ImageDetectionSetupState.SETUP_PARAMS
+                        }
+                    )
+                }
+
+                if (setupState == ImageDetectionSetupState.SETUP_PARAMS) {
+                    ImageParamsDialog(
+                        onDismiss = { imageSetupState.value = ImageDetectionSetupState.NONE },
+                        onSave = { type, threshold, timeout, action, offset ->
+                            saveImageStep(type, threshold, timeout, action, offset)
+                        }
+                    )
+                }
+
             } else {
-                // Collapsed overlay views
                 Box(
                     modifier = Modifier.wrapContentSize()
                 ) {
@@ -383,7 +432,7 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
                 startX = 300f,
                 startY = 800f,
                 endX = 300f,
-                endY = 400f, // Upward scroll default
+                endY = 400f,
                 duration = 800L,
                 delayAfter = 1000L
             )
@@ -395,6 +444,57 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
             else -> MacroStep(sequenceOrder = nextSeq, actionType = type)
         }
         macroSteps.add(newStep)
+    }
+
+    private fun triggerLiveCapture() {
+        overlayView?.visibility = View.GONE
+        serviceScope.launch {
+            kotlinx.coroutines.delay(150L)
+            AutoClickAccessibilityService.instance?.captureScreen { bitmap ->
+                overlayView?.visibility = View.VISIBLE
+                if (bitmap != null) {
+                    capturedBitmapState.value = bitmap
+                    imageSetupState.value = ImageDetectionSetupState.FREEZE_CROP
+                } else {
+                    Log.e(TAG, "Screen capture returned null")
+                    imageSetupState.value = ImageDetectionSetupState.NONE
+                }
+            }
+        }
+    }
+
+    private fun saveImageStep(
+        type: DetectionType,
+        threshold: Float,
+        timeout: Long,
+        action: TimeoutAction,
+        offset: String?
+    ) {
+        val density = resources.displayMetrics.density
+        val physX = (roiLeft.value * density).toInt()
+        val physY = (roiTop.value * density).toInt()
+        val physW = ((roiRight.value - roiLeft.value) * density).toInt()
+        val physH = ((roiBottom.value - roiTop.value) * density).toInt()
+
+        val nextSeq = macroSteps.size + 1
+        val newStep = MacroStep(
+            sequenceOrder = nextSeq,
+            actionType = ActionType.IMAGE_DETECTION,
+            templateImagePath = croppedImagePathState.value,
+            roiX = physX,
+            roiY = physY,
+            roiWidth = physW,
+            roiHeight = physH,
+            threshold = threshold,
+            timeout = timeout,
+            detectionType = type,
+            timeoutAction = action,
+            clickOffset = offset,
+            startX = roiLeft.value + (roiRight.value - roiLeft.value) / 2,
+            startY = roiTop.value + (roiBottom.value - roiTop.value) / 2
+        )
+        macroSteps.add(newStep)
+        imageSetupState.value = ImageDetectionSetupState.NONE
     }
 
     private fun saveMacro(name: String) {
@@ -414,13 +514,457 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
     }
 
     @Composable
+    fun SelectImageSourceDialog(
+        onDismiss: () -> Unit,
+        onLiveCapture: () -> Unit
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color(0x55000000))
+                .clickable { onDismiss() },
+            contentAlignment = Alignment.Center
+        ) {
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF222222)),
+                modifier = Modifier
+                    .width(320.dp)
+                    .clickable(enabled = false) {}
+                    .padding(16.dp)
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
+                    Text(
+                        text = "Image Detection - Template Source",
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 16.sp
+                    )
+
+                    Button(
+                        onClick = { onLiveCapture() },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4CAF50)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.Default.CameraAlt, contentDescription = null, modifier = Modifier.padding(end = 8.dp))
+                        Text("Capture Screen Now")
+                    }
+
+                    OutlinedButton(
+                        onClick = { onDismiss() },
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Cancel")
+                    }
+                }
+            }
+        }
+    }
+
+    @Composable
+    fun CropToolOverlay(
+        bitmap: Bitmap,
+        onDismiss: () -> Unit,
+        onCropped: (String) -> Unit
+    ) {
+        var cropLeft by remember { mutableStateOf(150f) }
+        var cropTop by remember { mutableStateOf(300f) }
+        var cropRight by remember { mutableStateOf(450f) }
+        var cropBottom by remember { mutableStateOf(600f) }
+
+        val density = LocalDensity.current.density
+
+        Box(
+            modifier = Modifier.fillMaxSize()
+        ) {
+            Image(
+                bitmap = bitmap.asImageBitmap(),
+                contentDescription = "Captured Screen",
+                modifier = Modifier.fillMaxSize()
+            )
+
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                val cropPath = Path().apply {
+                    addRect(androidx.compose.ui.geometry.Rect(cropLeft, cropTop, cropRight, cropBottom))
+                }
+                drawRect(
+                    color = Color.Black.copy(alpha = 0.5f)
+                )
+            }
+
+            Box(
+                modifier = Modifier
+                    .offset { IntOffset(cropLeft.toInt(), cropTop.toInt()) }
+                    .size(
+                        width = ((cropRight - cropLeft) / density).dp,
+                        height = ((cropBottom - cropTop) / density).dp
+                    )
+                    .border(2.dp, Color.White, RoundedCornerShape(4.dp))
+                    .pointerInput(Unit) {
+                        detectDragGestures { change, dragAmount ->
+                            change.consume()
+                            cropLeft += dragAmount.x
+                            cropRight += dragAmount.x
+                            cropTop += dragAmount.y
+                            cropBottom += dragAmount.y
+                        }
+                    }
+            )
+
+            Box(
+                modifier = Modifier
+                    .offset { IntOffset(cropRight.toInt() - 24, cropBottom.toInt() - 24) }
+                    .size(24.dp)
+                    .clip(CircleShape)
+                    .background(Color.White)
+                    .border(1.dp, Color.Black, CircleShape)
+                    .pointerInput(Unit) {
+                        detectDragGestures { change, dragAmount ->
+                            change.consume()
+                            cropRight = (cropRight + dragAmount.x).coerceAtLeast(cropLeft + 50f)
+                            cropBottom = (cropBottom + dragAmount.y).coerceAtLeast(cropTop + 50f)
+                        }
+                    },
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(Icons.Default.AspectRatio, contentDescription = null, modifier = Modifier.size(14.dp), tint = Color.Black)
+            }
+
+            Card(
+                shape = RoundedCornerShape(12.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xDD1E1E1E)),
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 80.dp)
+            ) {
+                Row(
+                    modifier = Modifier.padding(12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Crop Template Box", color = Color.White, fontWeight = FontWeight.Bold)
+                    Button(
+                        onClick = {
+                            val cropped = cropBitmap(bitmap, cropLeft * density, cropTop * density, cropRight * density, cropBottom * density)
+                            if (cropped != null) {
+                                val path = saveBitmapToInternalStorage(cropped)
+                                if (path != null) {
+                                    onCropped(path)
+                                }
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4CAF50))
+                    ) {
+                        Text("Crop & OK")
+                    }
+                    Button(
+                        onClick = { onDismiss() },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color.Red)
+                    ) {
+                        Text("Cancel")
+                    }
+                }
+            }
+        }
+    }
+
+    private fun cropBitmap(original: Bitmap, left: Float, top: Float, right: Float, bottom: Float): Bitmap? {
+        val x = left.coerceIn(0f, original.width.toFloat()).toInt()
+        val y = top.coerceIn(0f, original.height.toFloat()).toInt()
+        val width = (right - left).coerceIn(1f, (original.width - x).toFloat()).toInt()
+        val height = (bottom - top).coerceIn(1f, (original.height - y).toFloat()).toInt()
+        return try {
+            Bitmap.createBitmap(original, x, y, width, height)
+        } catch (e: Exception) {
+            Log.e(TAG, "Crop failed: $left, $top, $right, $bottom", e)
+            null
+        }
+    }
+
+    private fun saveBitmapToInternalStorage(bitmap: Bitmap): String? {
+        val file = File(filesDir, "template_${System.currentTimeMillis()}.png")
+        return try {
+            val out = FileOutputStream(file)
+            bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
+            out.flush()
+            out.close()
+            file.absolutePath
+        } catch (e: Exception) {
+            Log.e(TAG, "Save failed", e)
+            null
+        }
+    }
+
+    @Composable
+    fun RoiSelectorOverlay(
+        onDismiss: () -> Unit,
+        onConfirm: (Float, Float, Float, Float) -> Unit
+    ) {
+        var boxLeft by remember { mutableStateOf(100f) }
+        var boxTop by remember { mutableStateOf(200f) }
+        var boxRight by remember { mutableStateOf(600f) }
+        var boxBottom by remember { mutableStateOf(500f) }
+
+        val density = LocalDensity.current.density
+
+        Box(
+            modifier = Modifier.fillMaxSize()
+        ) {
+            Box(
+                modifier = Modifier
+                    .offset { IntOffset(boxLeft.toInt(), boxTop.toInt()) }
+                    .size(
+                        width = ((boxRight - boxLeft) / density).dp,
+                        height = ((boxBottom - boxTop) / density).dp
+                    )
+                    .border(2.dp, Color(0xFFE91E63), RoundedCornerShape(4.dp))
+                    .pointerInput(Unit) {
+                        detectDragGestures { change, dragAmount ->
+                            change.consume()
+                            boxLeft += dragAmount.x
+                            boxRight += dragAmount.x
+                            boxTop += dragAmount.y
+                            boxBottom += dragAmount.y
+                        }
+                    }
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color(0x1AE91E63)),
+                    contentAlignment = Alignment.TopStart
+                ) {
+                    Text(
+                        text = "🔍 Area Pencarian (ROI)",
+                        color = Color(0xFFE91E63),
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(4.dp)
+                    )
+                }
+            }
+
+            Box(
+                modifier = Modifier
+                    .offset { IntOffset(boxRight.toInt() - 24, boxBottom.toInt() - 24) }
+                    .size(24.dp)
+                    .clip(CircleShape)
+                    .background(Color(0xFFE91E63))
+                    .pointerInput(Unit) {
+                        detectDragGestures { change, dragAmount ->
+                            change.consume()
+                            boxRight = (boxRight + dragAmount.x).coerceAtLeast(boxLeft + 50f)
+                            boxBottom = (boxBottom + dragAmount.y).coerceAtLeast(boxTop + 50f)
+                        }
+                    },
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(Icons.Default.AspectRatio, contentDescription = null, modifier = Modifier.size(14.dp), tint = Color.White)
+            }
+
+            Card(
+                shape = RoundedCornerShape(12.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xDD1E1E1E)),
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 80.dp)
+            ) {
+                Row(
+                    modifier = Modifier.padding(12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Pilih Area Pencarian", color = Color.White, fontWeight = FontWeight.Bold)
+                    Button(
+                        onClick = { onConfirm(boxLeft, boxTop, boxRight, boxBottom) },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFE91E63))
+                    ) {
+                        Text("Confirm ROI")
+                    }
+                    Button(
+                        onClick = { onDismiss() },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color.Red)
+                    ) {
+                        Text("Cancel")
+                    }
+                }
+            }
+        }
+    }
+
+    @OptIn(ExperimentalMaterial3Api::class)
+    @Composable
+    fun ImageParamsDialog(
+        onDismiss: () -> Unit,
+        onSave: (DetectionType, Float, Long, TimeoutAction, String?) -> Unit
+    ) {
+        var detectionType by remember { mutableStateOf(DetectionType.WAIT_UNTIL_APPEAR) }
+        var threshold by remember { mutableStateOf(0.85f) }
+        var timeoutVal by remember { mutableStateOf(5000f) }
+        var timeoutAction by remember { mutableStateOf(TimeoutAction.STOP) }
+        var offsetX by remember { mutableStateOf("0") }
+        var offsetY by remember { mutableStateOf("0") }
+
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color(0x33000000))
+                .clickable { onDismiss() },
+            contentAlignment = Alignment.Center
+        ) {
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF222222)),
+                modifier = Modifier
+                    .width(340.dp)
+                    .clickable(enabled = false) {}
+                    .padding(16.dp)
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text(
+                        text = "Image Detection Settings",
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 16.sp
+                    )
+
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("Detection Type:", color = Color.LightGray, fontSize = 12.sp)
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            DetectionTypeButton(DetectionType.WAIT_UNTIL_APPEAR, "Appear", detectionType == DetectionType.WAIT_UNTIL_APPEAR) { detectionType = it }
+                            DetectionTypeButton(DetectionType.WAIT_UNTIL_DISAPPEAR, "Disappear", detectionType == DetectionType.WAIT_UNTIL_DISAPPEAR) { detectionType = it }
+                            DetectionTypeButton(DetectionType.CLICK_ON_APPEAR, "Click On", detectionType == DetectionType.CLICK_ON_APPEAR) { detectionType = it }
+                        }
+                    }
+
+                    Column {
+                        Text("Accuracy (Threshold): ${(threshold * 100).toInt()}%", color = Color.LightGray, fontSize = 12.sp)
+                        Slider(
+                            value = threshold,
+                            onValueChange = { threshold = it },
+                            valueRange = 0.70f..1.0f,
+                            colors = SliderDefaults.colors(thumbColor = Color(0xFFE91E63), activeTrackColor = Color(0xFFE91E63))
+                        )
+                    }
+
+                    Column {
+                        Text("Timeout: ${(timeoutVal / 1000f).toInt()}s", color = Color.LightGray, fontSize = 12.sp)
+                        Slider(
+                            value = timeoutVal,
+                            onValueChange = { timeoutVal = it },
+                            valueRange = 1000f..30000f,
+                            colors = SliderDefaults.colors(thumbColor = Color(0xFFE91E63), activeTrackColor = Color(0xFFE91E63))
+                        )
+                    }
+
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(16.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("If Timeout:", color = Color.LightGray, fontSize = 12.sp)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            RadioButton(selected = timeoutAction == TimeoutAction.STOP, onClick = { timeoutAction = TimeoutAction.STOP })
+                            Text("Stop", color = Color.White, fontSize = 12.sp)
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            RadioButton(selected = timeoutAction == TimeoutAction.SKIP, onClick = { timeoutAction = TimeoutAction.SKIP })
+                            Text("Skip", color = Color.White, fontSize = 12.sp)
+                        }
+                    }
+
+                    if (detectionType == DetectionType.CLICK_ON_APPEAR) {
+                        Column {
+                            Text("Click Offset (X, Y px):", color = Color.LightGray, fontSize = 12.sp)
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                TextField(
+                                    value = offsetX,
+                                    onValueChange = { offsetX = it },
+                                    label = { Text("X") },
+                                    singleLine = true,
+                                    modifier = Modifier.weight(1f),
+                                    colors = TextFieldDefaults.colors(
+                                        focusedTextColor = Color.White,
+                                        unfocusedTextColor = Color.White,
+                                        focusedContainerColor = Color(0xFF333333),
+                                        unfocusedContainerColor = Color(0xFF333333)
+                                    )
+                                )
+                                TextField(
+                                    value = offsetY,
+                                    onValueChange = { offsetY = it },
+                                    label = { Text("Y") },
+                                    singleLine = true,
+                                    modifier = Modifier.weight(1f),
+                                    colors = TextFieldDefaults.colors(
+                                        focusedTextColor = Color.White,
+                                        unfocusedTextColor = Color.White,
+                                        focusedContainerColor = Color(0xFF333333),
+                                        unfocusedContainerColor = Color(0xFF333333)
+                                    )
+                                )
+                            }
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedButton(onClick = { onDismiss() }, modifier = Modifier.weight(1f), colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White)) {
+                            Text("Cancel")
+                        }
+                        Button(
+                            onClick = {
+                                val offset = if (detectionType == DetectionType.CLICK_ON_APPEAR) "${offsetX.toIntOrNull() ?: 0},${offsetY.toIntOrNull() ?: 0}" else null
+                                onSave(detectionType, threshold, timeoutVal.toLong(), timeoutAction, offset)
+                            },
+                            modifier = Modifier.weight(1f),
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFE91E63))
+                        ) {
+                            Text("Save")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @Composable
+    fun DetectionTypeButton(
+        type: DetectionType,
+        label: String,
+        selected: Boolean,
+        onClick: (DetectionType) -> Unit
+    ) {
+        val containerColor = if (selected) Color(0xFFE91E63) else Color(0xFF333333)
+        val contentColor = Color.White
+        Box(
+            modifier = Modifier
+                .clip(RoundedCornerShape(8.dp))
+                .background(containerColor)
+                .clickable { onClick(type) }
+                .padding(horizontal = 8.dp, vertical = 6.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(text = label, color = contentColor, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+        }
+    }
+
+    @Composable
     fun ActionMarker(
         step: MacroStep,
         index: Int,
         onSelect: () -> Unit,
         onUpdate: (MacroStep) -> Unit
     ) {
-        val density = LocalDensity.current
+        val density = LocalDensity.current.density
         val markerColor = when (step.actionType) {
             ActionType.TAP -> Color(0xFF4CAF50)
             ActionType.HOLD -> Color(0xFF2196F3)
@@ -430,10 +974,8 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
             ActionType.DELAY -> Color(0xFF9E9E9E)
         }
 
-        // Delay steps are purely timer based and do not need a draggable spatial marker
         if (step.actionType == ActionType.DELAY) return
 
-        // Draggable start coordinate
         if (step.startX != null && step.startY != null) {
             Box(
                 modifier = Modifier
@@ -456,17 +998,20 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
                     .clickable { onSelect() },
                 contentAlignment = Alignment.Center
             ) {
-                val label = if (step.actionType == ActionType.HOLD) "${step.sequenceOrder}⏱" else "${step.sequenceOrder}"
+                val textLabel = when (step.actionType) {
+                    ActionType.HOLD -> "${step.sequenceOrder}⏱"
+                    ActionType.IMAGE_DETECTION -> "${step.sequenceOrder}🖼️"
+                    else -> "${step.sequenceOrder}"
+                }
                 Text(
-                    text = label,
+                    text = textLabel,
                     color = Color.White,
                     fontWeight = FontWeight.Bold,
-                    fontSize = 14.sp
+                    fontSize = 13.sp
                 )
             }
         }
 
-        // Draggable end coordinate (for drag/scroll)
         if ((step.actionType == ActionType.DRAG || step.actionType == ActionType.SCROLL) &&
             step.endX != null && step.endY != null
         ) {
@@ -511,7 +1056,6 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
                 ) {
                     val color = if (step.actionType == ActionType.DRAG) Color(0xFFFF9800) else Color(0xFF9C27B0)
                     
-                    // Draw path line
                     drawLine(
                         color = color,
                         start = Offset(step.startX, step.startY),
@@ -519,7 +1063,6 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
                         strokeWidth = 3.dp.toPx()
                     )
 
-                    // Draw arrowhead at end coordinate pointing towards end position
                     val dx = step.endX - step.startX
                     val dy = step.endY - step.startY
                     val angle = Math.atan2(dy.toDouble(), dx.toDouble())
@@ -580,7 +1123,6 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
                         fontSize = 16.sp
                     )
 
-                    // Delay config
                     Column {
                         Text(
                             text = "Delay after step: ${delayVal.toInt()}ms",
@@ -598,13 +1140,12 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
                         )
                     }
 
-                    // Duration config (if applicable)
                     if (step.actionType == ActionType.HOLD || 
                         step.actionType == ActionType.DRAG || 
                         step.actionType == ActionType.SCROLL) {
                         
                         Column {
-                            val label = if (step.actionType == ActionType.HOLD) "Hold duration" else "Drag duration"
+                            val label = if (step.actionType == ActionType.HOLD) "Hold duration" else "Drag/Scroll duration"
                             Text(
                                 text = "$label: ${String.format("%.1f", durationVal / 1000f)}s",
                                 color = Color.LightGray,
@@ -691,10 +1232,11 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
                         value = nameText,
                         onValueChange = { nameText = it },
                         placeholder = { Text("farming_v1") },
-                        colors = TextFieldDefaults.textFieldColors(
+                        colors = TextFieldDefaults.colors(
                             focusedTextColor = Color.White,
                             unfocusedTextColor = Color.White,
-                            containerColor = Color(0xFF333333)
+                            focusedContainerColor = Color(0xFF333333),
+                            unfocusedContainerColor = Color(0xFF333333)
                         ),
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
@@ -751,6 +1293,7 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
         onAddDrag: () -> Unit,
         onAddScroll: () -> Unit,
         onAddDelay: () -> Unit,
+        onAddImage: () -> Unit,
         onSave: () -> Unit,
         onClose: () -> Unit
     ) {
@@ -768,6 +1311,7 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
                 ToolbarButton(Icons.Default.Timer, "HOLD", Color(0xFF2196F3)) { onAddHold() }
                 ToolbarButton(Icons.Default.TrendingFlat, "DRAG", Color(0xFFFF9800)) { onAddDrag() }
                 ToolbarButton(Icons.Default.SwapVert, "SCROLL", Color(0xFF9C27B0)) { onAddScroll() }
+                ToolbarButton(Icons.Default.Image, "IMAGE", Color(0xFFE91E63)) { onAddImage() }
                 ToolbarButton(Icons.Default.HourglassEmpty, "DELAY", Color(0xFF9E9E9E)) { onAddDelay() }
 
                 VerticalDivider(color = Color.DarkGray, modifier = Modifier.height(28.dp))
@@ -857,4 +1401,12 @@ enum class OverlayMode {
     IDLE,
     EDITING,
     PLAYING
+}
+
+enum class ImageDetectionSetupState {
+    NONE,
+    SELECT_SOURCE,
+    FREEZE_CROP,
+    SETUP_ROI,
+    SETUP_PARAMS
 }
