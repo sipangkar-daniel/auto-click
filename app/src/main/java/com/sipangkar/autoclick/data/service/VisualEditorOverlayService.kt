@@ -54,6 +54,7 @@ import androidx.savedstate.SavedStateRegistry
 import androidx.savedstate.SavedStateRegistryController
 import androidx.savedstate.SavedStateRegistryOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
+import com.sipangkar.autoclick.data.engine.PlaybackEngine
 import com.sipangkar.autoclick.domain.model.ActionType
 import com.sipangkar.autoclick.domain.model.DetectionType
 import com.sipangkar.autoclick.domain.model.Macro
@@ -85,6 +86,7 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
 
         val macroSteps = mutableStateListOf<MacroStep>()
         var activeMacroName = mutableStateOf("New Macro")
+        val activeMacroState = mutableStateOf<Macro?>(null)
 
         fun setMode(mode: OverlayMode) {
             _currentMode.value = mode
@@ -93,6 +95,9 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
 
     @Inject
     lateinit var saveMacroUseCase: SaveMacroUseCase
+
+    @Inject
+    lateinit var playbackEngine: PlaybackEngine
 
     private val lifecycleRegistry = LifecycleRegistry(this)
     private val savedStateRegistryController = SavedStateRegistryController.create(this)
@@ -134,6 +139,18 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
         serviceScope.launch {
             currentMode.collect { mode ->
                 updateWindowSize(mode == OverlayMode.EDITING)
+                if (mode == OverlayMode.PLAYING) {
+                    val macro = activeMacroState.value
+                    if (macro != null) {
+                        playbackEngine.startPlayback(macro, serviceScope) {
+                            setMode(OverlayMode.IDLE)
+                        }
+                    } else {
+                        setMode(OverlayMode.IDLE)
+                    }
+                } else {
+                    playbackEngine.stopPlayback()
+                }
             }
         }
     }
@@ -588,9 +605,6 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
             )
 
             Canvas(modifier = Modifier.fillMaxSize()) {
-                val cropPath = Path().apply {
-                    addRect(androidx.compose.ui.geometry.Rect(cropLeft, cropTop, cropRight, cropBottom))
-                }
                 drawRect(
                     color = Color.Black.copy(alpha = 0.5f)
                 )
@@ -1000,7 +1014,7 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
             ) {
                 val textLabel = when (step.actionType) {
                     ActionType.HOLD -> "${step.sequenceOrder}⏱"
-                    ActionType.IMAGE_DETECTION -> "${step.sequenceOrder}🖼️"
+                    ActionType.IMAGE_DETECTION -> "${step.sequenceOrder}🖼"
                     else -> "${step.sequenceOrder}"
                 }
                 Text(
@@ -1324,6 +1338,10 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
 
     @Composable
     fun PlayingProgressBar(modifier: Modifier = Modifier) {
+        val currentStep by playbackEngine.currentStep.collectAsState()
+        val totalSteps = activeMacroState.value?.steps?.size ?: 1
+        val progress = if (currentStep != null) currentStep!!.toFloat() / totalSteps else 0f
+
         Card(
             shape = RoundedCornerShape(12.dp),
             colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E1E)),
@@ -1339,8 +1357,9 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
                     horizontalArrangement = Arrangement.SpaceBetween,
                     modifier = Modifier.fillMaxWidth()
                 ) {
+                    val stepLabel = if (currentStep != null) "Step $currentStep / $totalSteps" else "Playing..."
                     Text(
-                        text = "Playing...",
+                        text = stepLabel,
                         color = Color.White,
                         fontSize = 14.sp
                     )
@@ -1350,10 +1369,11 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
                         tint = Color.Red,
                         modifier = Modifier
                             .size(24.dp)
-                            .clickable { setMode(OverlayMode.EDITING) }
+                            .clickable { setMode(OverlayMode.IDLE) }
                     )
                 }
                 LinearProgressIndicator(
+                    progress = progress,
                     color = Color(0xFF4CAF50),
                     trackColor = Color.DarkGray,
                     modifier = Modifier.fillMaxWidth()
