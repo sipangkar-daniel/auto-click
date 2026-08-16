@@ -245,7 +245,19 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
             layoutParams.x = 100
             layoutParams.y = 300
         }
-        overlayView?.let { view ->
+    }
+
+    private fun performClickThrough(x: Float, y: Float) {
+        val view = overlayView ?: return
+        
+        // Temporarily make overlay window untouchable
+        layoutParams.flags = layoutParams.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+        windowManager.updateViewLayout(view, layoutParams)
+
+        // Trigger simulated tap
+        AutoClickAccessibilityService.instance?.performClick(x, y) {
+            // Restore touchable flag after click finishes
+            layoutParams.flags = layoutParams.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
             windowManager.updateViewLayout(view, layoutParams)
         }
     }
@@ -282,7 +294,7 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
                         .background(Color(0x11000000))
                         .pointerInput(Unit) {
                             detectTapGestures { offset ->
-                                AutoClickAccessibilityService.instance?.performClick(offset.x, offset.y) {}
+                                performClickThrough(offset.x, offset.y)
                             }
                         }
                 )
