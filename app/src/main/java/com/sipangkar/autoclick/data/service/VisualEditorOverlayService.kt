@@ -88,6 +88,7 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
         val macroSteps = mutableStateListOf<MacroStep>()
         var activeMacroName = mutableStateOf("New Macro")
         val activeMacroState = mutableStateOf<Macro?>(null)
+        var isTryingFlow = false
 
         fun setMode(mode: OverlayMode) {
             _currentMode.value = mode
@@ -144,7 +145,12 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
                     val macro = activeMacroState.value
                     if (macro != null) {
                         playbackEngine.startPlayback(macro, serviceScope) {
-                            setMode(OverlayMode.IDLE)
+                            if (isTryingFlow) {
+                                isTryingFlow = false
+                                setMode(OverlayMode.EDITING)
+                            } else {
+                                setMode(OverlayMode.IDLE)
+                            }
                         }
                     } else {
                         setMode(OverlayMode.IDLE)
@@ -341,6 +347,15 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
                         onAddScroll = { addStep(ActionType.SCROLL) },
                         onAddDelay = { addStep(ActionType.DELAY) },
                         onAddImage = { imageSetupState.value = ImageDetectionSetupState.SELECT_SOURCE },
+                        onTryFlow = {
+                            isTryingFlow = true
+                            val tempMacro = Macro(
+                                name = activeMacroName.value,
+                                steps = ArrayList(macroSteps)
+                            )
+                            activeMacroState.value = tempMacro
+                            setMode(OverlayMode.PLAYING)
+                        },
                         onSave = { showSaveDialog = true },
                         onClose = { setMode(OverlayMode.IDLE) }
                     )
@@ -1328,6 +1343,7 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
         onAddScroll: () -> Unit,
         onAddDelay: () -> Unit,
         onAddImage: () -> Unit,
+        onTryFlow: () -> Unit,
         onSave: () -> Unit,
         onClose: () -> Unit
     ) {
@@ -1350,6 +1366,7 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
 
                 VerticalDivider(color = Color.DarkGray, modifier = Modifier.height(28.dp))
 
+                ToolbarButton(Icons.Default.PlayArrow, "Try Flow", Color(0xFF4CAF50)) { onTryFlow() }
                 ToolbarButton(Icons.Default.Save, "Save", Color.White) { onSave() }
                 ToolbarButton(Icons.Default.Close, "Close", Color.Red) { onClose() }
             }
