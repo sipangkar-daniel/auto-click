@@ -380,7 +380,7 @@ fun EmptyStateCard() {
                 textAlign = TextAlign.Center
             )
             Text(
-                text = "Buat makro baru",
+                text = "Buat makro baru dengan mengeklik tombol + di sudut kanan bawah.",
                 fontSize = 12.sp,
                 color = Color.Gray,
                 textAlign = TextAlign.Center

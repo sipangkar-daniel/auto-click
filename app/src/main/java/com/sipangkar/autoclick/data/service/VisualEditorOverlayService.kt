@@ -19,6 +19,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -279,6 +280,11 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
                     modifier = Modifier
                         .fillMaxSize()
                         .background(Color(0x11000000))
+                        .pointerInput(Unit) {
+                            detectTapGestures { offset ->
+                                AutoClickAccessibilityService.instance?.performClick(offset.x, offset.y) {}
+                            }
+                        }
                 )
 
                 DragArrowsCanvas()
