@@ -1029,7 +1029,7 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
                     .offset { IntOffset(step.startX.toInt() - 40, step.startY.toInt() - 40) }
                     .size(50.dp)
                     .clip(CircleShape)
-                    .background(markerColor)
+                    .background(markerColor.copy(alpha = 0.8f))
                     .border(2.dp, Color.White, CircleShape)
                     .pointerInput(Unit) {
                         detectDragGestures { change, dragAmount ->
@@ -1322,7 +1322,7 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
             modifier = modifier
                 .size(56.dp)
                 .clip(CircleShape)
-                .background(Color(0xFF212121))
+                .background(Color(0xCC212121))
                 .clickable { setMode(OverlayMode.EDITING) },
             contentAlignment = Alignment.Center
         ) {
@@ -1349,7 +1349,7 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
     ) {
         Card(
             shape = RoundedCornerShape(16.dp),
-            colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E1E)),
+            colors = CardDefaults.cardColors(containerColor = Color(0xCC1E1E1E)),
             elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
         ) {
             Row(
@@ -1381,7 +1381,7 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
 
         Card(
             shape = RoundedCornerShape(12.dp),
-            colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E1E)),
+            colors = CardDefaults.cardColors(containerColor = Color(0xCC1E1E1E)),
             elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
             modifier = modifier.width(200.dp)
         ) {
@@ -1430,7 +1430,7 @@ class VisualEditorOverlayService : Service(), LifecycleOwner, ViewModelStoreOwne
             modifier = Modifier
                 .size(36.dp)
                 .clip(CircleShape)
-                .background(Color(0xFF2D2D2D))
+                .background(Color(0xCC2D2D2D))
                 .clickable { onClick() },
             contentAlignment = Alignment.Center
         ) {
