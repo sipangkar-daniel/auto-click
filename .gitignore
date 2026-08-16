@@ -1,3 +1,31 @@
-.idea
+# Gradle files
+.gradle/
+build/
+**/build/
+
+# Local configuration
+local.properties
+
+# Android Studio & IntelliJ
+.idea/
+*.iml
+*.iws
+*.ipr
+out/
+
+# Gradle Wrapper downloaded zip and temp extraction folders
+gradle-8.4-bin.zip
+gradle-temp/
+
+# OS/System files
+.DS_Store
+Thumbs.db
+
+# Sign files
+*.jks
+*.keystore
+*.pk8
+
+# PRD files (ignored as requested)
 prd/PRODUCT REQUIREMENTS DOCUMENT (PRD).txt
 prd/UPDATE PRD - IMAGE DETECTION.txt
